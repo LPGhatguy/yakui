@@ -20,5 +20,5 @@ log = "0.4.17"
 pollster = "0.3.0"
 profiling = "1.0.6"
 tracy-client = { version = "0.15.1", optional = true }
-wgpu = "0.20.1"
+wgpu = "22.1.0"
 winit = "0.29.2"

@@ -471,6 +471,7 @@ fn make_main_pipeline(
             count: samples,
             ..Default::default()
         },
+        cache: None,
         multiview: None,
     })
 }
@@ -519,6 +520,7 @@ fn make_text_pipeline(
             count: samples,
             ..Default::default()
         },
+        cache: None,
         multiview: None,
     })
 }

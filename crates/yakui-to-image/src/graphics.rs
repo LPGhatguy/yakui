@@ -27,6 +27,7 @@ impl Graphics {
                 &wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
+                    memory_hints: Default::default(),
                     label: None,
                 },
                 None,
