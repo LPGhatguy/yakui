@@ -11,7 +11,7 @@ edition = "2021"
 [dependencies]
 anymap = "0.12.1"
 bitflags = "2.4.2"
-glam = "0.27.0"
+glam = "0.29.0"
 keyboard-types = { version = "0.7.0", default-features = false }
 log = "0.4.17"
 fast-srgb8 = "1.0.0"
