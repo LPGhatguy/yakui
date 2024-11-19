@@ -33,8 +33,10 @@ use yakui_core::{paint::Vertex as YakuiVertex, ManagedTextureId};
 pub struct YakuiVulkan {
     /// The pipeline layout used to draw
     pipeline_layout: vk::PipelineLayout,
-    /// The graphics pipeline used to draw
-    graphics_pipeline: vk::Pipeline,
+    /// The graphics pipeline used to draw images
+    image_pipeline: vk::Pipeline,
+    /// The graphics pipeline used to draw text
+    text_pipeline: vk::Pipeline,
     /// A single index buffer, shared between all draw calls
     index_buffer: Buffer<u32>,
     /// A single vertex buffer, shared between all draw calls
@@ -52,7 +54,7 @@ pub struct YakuiVulkan {
 
 /// Vulkan configuration
 #[non_exhaustive]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct Options {
     /// Indicates that VK_KHR_dynamic_rendering is enabled and should be used with the given format
     pub dynamic_rendering_format: Option<vk::Format>,
@@ -69,7 +71,7 @@ struct DrawCall {
     index_count: u32,
     clip: Option<yakui::geometry::Rect>,
     texture_id: u32,
-    workflow: Workflow,
+    pipeline: yakui::paint::Pipeline,
 }
 
 #[repr(C)]
@@ -77,39 +79,14 @@ struct DrawCall {
 /// Push constant used to determine texture and workflow
 struct PushConstant {
     texture_id: u32,
-    workflow: Workflow,
 }
 
 unsafe impl Zeroable for PushConstant {}
 unsafe impl Pod for PushConstant {}
 
 impl PushConstant {
-    pub fn new(texture_id: u32, workflow: Workflow) -> Self {
-        Self {
-            texture_id,
-            workflow,
-        }
-    }
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug)]
-/// The workflow to use in the shader
-enum Workflow {
-    Main,
-    Text,
-}
-
-unsafe impl bytemuck::Zeroable for Workflow {}
-unsafe impl bytemuck::Pod for Workflow {}
-
-impl From<yakui::paint::Pipeline> for Workflow {
-    fn from(p: yakui::paint::Pipeline) -> Self {
-        match p {
-            yakui::paint::Pipeline::Main => Workflow::Main,
-            yakui::paint::Pipeline::Text => Workflow::Text,
-            _ => panic!("Unknown pipeline {p:?}"),
-        }
+    pub fn new(texture_id: u32) -> Self {
+        Self { texture_id }
     }
 }
 
@@ -144,29 +121,6 @@ impl YakuiVulkan {
         let index_buffer = Buffer::new(vulkan_context, vk::BufferUsageFlags::INDEX_BUFFER, &[]);
         let vertex_buffer = Buffer::new(vulkan_context, vk::BufferUsageFlags::VERTEX_BUFFER, &[]);
 
-        let mut vertex_spv_file = Cursor::new(&include_bytes!("../shaders/main.vert.spv")[..]);
-        let mut frag_spv_file = Cursor::new(&include_bytes!("../shaders/main.frag.spv")[..]);
-
-        let vertex_code =
-            read_spv(&mut vertex_spv_file).expect("Failed to read vertex shader spv file");
-        let vertex_shader_info = vk::ShaderModuleCreateInfo::default().code(&vertex_code);
-
-        let frag_code =
-            read_spv(&mut frag_spv_file).expect("Failed to read fragment shader spv file");
-        let frag_shader_info = vk::ShaderModuleCreateInfo::default().code(&frag_code);
-
-        let vertex_shader_module = unsafe {
-            device
-                .create_shader_module(&vertex_shader_info, None)
-                .expect("Vertex shader module error")
-        };
-
-        let fragment_shader_module = unsafe {
-            device
-                .create_shader_module(&frag_shader_info, None)
-                .expect("Fragment shader module error")
-        };
-
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(
@@ -182,157 +136,24 @@ impl YakuiVulkan {
                 .unwrap()
         };
 
-        let shader_entry_name = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
-        let shader_stage_create_infos = [
-            vk::PipelineShaderStageCreateInfo {
-                module: vertex_shader_module,
-                p_name: shader_entry_name.as_ptr(),
-                stage: vk::ShaderStageFlags::VERTEX,
-                ..Default::default()
-            },
-            vk::PipelineShaderStageCreateInfo {
-                s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
-                module: fragment_shader_module,
-                p_name: shader_entry_name.as_ptr(),
-                stage: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-        ];
-        let vertex_input_binding_descriptions = [vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<Vertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-
-        let vertex_input_attribute_descriptions = [
-            // position
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: bytemuck::offset_of!(Vertex, position) as _,
-            },
-            // UV / texcoords
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: bytemuck::offset_of!(Vertex, texcoord) as _,
-            },
-            // color
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R32G32B32A32_SFLOAT,
-                offset: bytemuck::offset_of!(Vertex, color) as _,
-            },
-        ];
-
-        let vertex_input_state_info = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_attribute_descriptions(&vertex_input_attribute_descriptions)
-            .vertex_binding_descriptions(&vertex_input_binding_descriptions);
-        let vertex_input_assembly_state_info = vk::PipelineInputAssemblyStateCreateInfo {
-            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-            ..Default::default()
-        };
-        let viewport_state_info = vk::PipelineViewportStateCreateInfo::default()
-            .scissor_count(1)
-            .viewport_count(1);
-
-        let rasterization_info = vk::PipelineRasterizationStateCreateInfo {
-            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
-            line_width: 1.0,
-            polygon_mode: vk::PolygonMode::FILL,
-            ..Default::default()
-        };
-        let multisample_state_info = vk::PipelineMultisampleStateCreateInfo {
-            rasterization_samples: vk::SampleCountFlags::TYPE_1,
-            ..Default::default()
-        };
-        let noop_stencil_state = vk::StencilOpState {
-            fail_op: vk::StencilOp::KEEP,
-            pass_op: vk::StencilOp::KEEP,
-            depth_fail_op: vk::StencilOp::KEEP,
-            compare_op: vk::CompareOp::ALWAYS,
-            ..Default::default()
-        };
-        let depth_state_info = vk::PipelineDepthStencilStateCreateInfo {
-            depth_test_enable: 1,
-            depth_write_enable: 1,
-            depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
-            front: noop_stencil_state,
-            back: noop_stencil_state,
-            max_depth_bounds: 1.0,
-            ..Default::default()
-        };
-        let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState {
-            blend_enable: 1,
-            src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-            dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-            color_blend_op: vk::BlendOp::ADD,
-            src_alpha_blend_factor: vk::BlendFactor::ONE,
-            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
-            alpha_blend_op: vk::BlendOp::ADD,
-            color_write_mask: vk::ColorComponentFlags::RGBA,
-        }];
-        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
-            .logic_op(vk::LogicOp::CLEAR)
-            .attachments(&color_blend_attachment_states);
-
-        let dynamic_state = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state_info =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_state);
-
-        let mut graphic_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&shader_stage_create_infos)
-            .vertex_input_state(&vertex_input_state_info)
-            .input_assembly_state(&vertex_input_assembly_state_info)
-            .viewport_state(&viewport_state_info)
-            .rasterization_state(&rasterization_info)
-            .multisample_state(&multisample_state_info)
-            .depth_stencil_state(&depth_state_info)
-            .color_blend_state(&color_blend_state)
-            .dynamic_state(&dynamic_state_info)
-            .layout(pipeline_layout);
-        let rendering_info_formats;
-        let mut rendering_info;
-        assert!(
-            options.dynamic_rendering_format.is_some()
-                || options.render_pass != vk::RenderPass::null(),
-            "either dynamic_rendering_format or render_pass must be set"
+        let image_pipeline = create_graphics_pipeline(
+            pipeline_layout,
+            options,
+            device,
+            yakui::paint::Pipeline::Main,
         );
-        if let Some(format) = options.dynamic_rendering_format {
-            rendering_info_formats = [format];
-            rendering_info = vk::PipelineRenderingCreateInfo::default()
-                .color_attachment_formats(&rendering_info_formats);
-            graphic_pipeline_info = graphic_pipeline_info.push_next(&mut rendering_info);
-        } else {
-            graphic_pipeline_info = graphic_pipeline_info
-                .render_pass(options.render_pass)
-                .subpass(options.subpass);
-        }
-
-        let graphics_pipelines = unsafe {
-            device
-                .create_graphics_pipelines(
-                    vk::PipelineCache::null(),
-                    &[graphic_pipeline_info],
-                    None,
-                )
-                .expect("Unable to create graphics pipeline")
-        };
-
-        let graphics_pipeline = graphics_pipelines[0];
-
-        unsafe {
-            device.destroy_shader_module(vertex_shader_module, None);
-            device.destroy_shader_module(fragment_shader_module, None);
-        }
+        let text_pipeline = create_graphics_pipeline(
+            pipeline_layout,
+            options,
+            device,
+            yakui::paint::Pipeline::Text,
+        );
 
         Self {
             descriptors,
             pipeline_layout,
-            graphics_pipeline,
+            image_pipeline,
+            text_pipeline,
             index_buffer,
             vertex_buffer,
             user_textures: Default::default(),
@@ -413,7 +234,7 @@ impl YakuiVulkan {
             device.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.graphics_pipeline,
+                self.image_pipeline,
             );
             let default_scissor = [resolution.into()];
 
@@ -486,7 +307,7 @@ impl YakuiVulkan {
                     self.pipeline_layout,
                     vk::ShaderStageFlags::FRAGMENT,
                     0,
-                    bytes_of(&PushConstant::new(draw_call.texture_id, draw_call.workflow)),
+                    bytes_of(&PushConstant::new(draw_call.texture_id)),
                 );
 
                 // Draw the mesh with the indexes we were provided
@@ -548,7 +369,7 @@ impl YakuiVulkan {
             texture.cleanup(device);
         }
         device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_pipeline(self.graphics_pipeline, None);
+        device.destroy_pipeline(self.image_pipeline, None);
         self.index_buffer.cleanup(device);
         self.vertex_buffer.cleanup(device);
         self.uploads.cleanup(device);
@@ -661,7 +482,7 @@ impl YakuiVulkan {
                 index_count,
                 clip: call.clip,
                 texture_id,
-                workflow: call.pipeline.into(),
+                pipeline: call.pipeline.into(),
             });
         }
 
@@ -672,4 +493,174 @@ impl YakuiVulkan {
 
         draw_calls
     }
+}
+
+fn create_graphics_pipeline(
+    pipeline_layout: vk::PipelineLayout,
+    options: Options,
+    device: &ash::Device,
+    yakui_pipeline: yakui::paint::Pipeline,
+) -> vk::Pipeline {
+    let mut vertex_spv_file = Cursor::new(&include_bytes!("../shaders/main.vert.spv")[..]);
+    let mut frag_spv_file = Cursor::new(&include_bytes!("../shaders/main.frag.spv")[..]);
+
+    let vertex_code =
+        read_spv(&mut vertex_spv_file).expect("Failed to read vertex shader spv file");
+    let vertex_shader_info = vk::ShaderModuleCreateInfo::default().code(&vertex_code);
+
+    let frag_code = read_spv(&mut frag_spv_file).expect("Failed to read fragment shader spv file");
+    let frag_shader_info = vk::ShaderModuleCreateInfo::default().code(&frag_code);
+
+    let vertex_shader_module = unsafe {
+        device
+            .create_shader_module(&vertex_shader_info, None)
+            .expect("Vertex shader module error")
+    };
+
+    let fragment_shader_module = unsafe {
+        device
+            .create_shader_module(&frag_shader_info, None)
+            .expect("Fragment shader module error")
+    };
+    let shader_entry_name = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
+    let shader_stage_create_infos = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .module(vertex_shader_module)
+            .name(shader_entry_name)
+            .stage(vk::ShaderStageFlags::VERTEX),
+        vk::PipelineShaderStageCreateInfo::default()
+            .module(fragment_shader_module)
+            .name(shader_entry_name)
+            .stage(vk::ShaderStageFlags::FRAGMENT),
+    ];
+    let vertex_input_binding_descriptions = [vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: std::mem::size_of::<Vertex>() as u32,
+        input_rate: vk::VertexInputRate::VERTEX,
+    }];
+
+    let vertex_input_attribute_descriptions = [
+        // position
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: bytemuck::offset_of!(Vertex, position) as _,
+        },
+        // UV / texcoords
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: bytemuck::offset_of!(Vertex, texcoord) as _,
+        },
+        // color
+        vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: vk::Format::R32G32B32A32_SFLOAT,
+            offset: bytemuck::offset_of!(Vertex, color) as _,
+        },
+    ];
+
+    let vertex_input_state_info = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_attribute_descriptions(&vertex_input_attribute_descriptions)
+        .vertex_binding_descriptions(&vertex_input_binding_descriptions);
+    let vertex_input_assembly_state_info = vk::PipelineInputAssemblyStateCreateInfo {
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        ..Default::default()
+    };
+    let viewport_state_info = vk::PipelineViewportStateCreateInfo::default()
+        .scissor_count(1)
+        .viewport_count(1);
+
+    let rasterization_info = vk::PipelineRasterizationStateCreateInfo {
+        front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+        line_width: 1.0,
+        polygon_mode: vk::PolygonMode::FILL,
+        ..Default::default()
+    };
+    let multisample_state_info = vk::PipelineMultisampleStateCreateInfo {
+        rasterization_samples: vk::SampleCountFlags::TYPE_1,
+        ..Default::default()
+    };
+    let noop_stencil_state = vk::StencilOpState {
+        fail_op: vk::StencilOp::KEEP,
+        pass_op: vk::StencilOp::KEEP,
+        depth_fail_op: vk::StencilOp::KEEP,
+        compare_op: vk::CompareOp::ALWAYS,
+        ..Default::default()
+    };
+    let depth_state_info = vk::PipelineDepthStencilStateCreateInfo {
+        depth_test_enable: 1,
+        depth_write_enable: 1,
+        depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
+        front: noop_stencil_state,
+        back: noop_stencil_state,
+        max_depth_bounds: 1.0,
+        ..Default::default()
+    };
+
+    let color_blend_attachment_state = vk::PipelineColorBlendAttachmentState {
+        blend_enable: 1,
+        src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+        dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        color_blend_op: vk::BlendOp::ADD,
+        src_alpha_blend_factor: vk::BlendFactor::ONE,
+        dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+        alpha_blend_op: vk::BlendOp::ADD,
+        color_write_mask: vk::ColorComponentFlags::RGBA,
+    };
+
+    let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op(vk::LogicOp::CLEAR)
+        .attachments(std::slice::from_ref(&color_blend_attachment_state));
+
+    let dynamic_state = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state_info =
+        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_state);
+
+    let mut graphic_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&shader_stage_create_infos)
+        .vertex_input_state(&vertex_input_state_info)
+        .input_assembly_state(&vertex_input_assembly_state_info)
+        .viewport_state(&viewport_state_info)
+        .rasterization_state(&rasterization_info)
+        .multisample_state(&multisample_state_info)
+        .depth_stencil_state(&depth_state_info)
+        .color_blend_state(&color_blend_state)
+        .dynamic_state(&dynamic_state_info)
+        .layout(pipeline_layout);
+    let rendering_info_formats;
+    let mut rendering_info;
+
+    assert!(
+        options.dynamic_rendering_format.is_some() || options.render_pass != vk::RenderPass::null(),
+        "either dynamic_rendering_format or render_pass must be set"
+    );
+    if let Some(format) = options.dynamic_rendering_format {
+        rendering_info_formats = [format];
+        rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&rendering_info_formats);
+        graphic_pipeline_info = graphic_pipeline_info.push_next(&mut rendering_info);
+    } else {
+        graphic_pipeline_info = graphic_pipeline_info
+            .render_pass(options.render_pass)
+            .subpass(options.subpass);
+    }
+
+    let graphics_pipelines = unsafe {
+        device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[graphic_pipeline_info], None)
+            .expect("Unable to create graphics pipeline")
+    };
+
+    let graphics_pipeline = graphics_pipelines[0];
+
+    unsafe {
+        device.destroy_shader_module(vertex_shader_module, None);
+        device.destroy_shader_module(fragment_shader_module, None);
+    }
+
+    graphics_pipeline
 }
