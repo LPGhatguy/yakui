@@ -14,9 +14,10 @@ use crate::widgets::{
     CheckboxResponse, Circle, CircleResponse, ColoredBox, ColoredBoxResponse, ConstrainedBox,
     ConstrainedBoxResponse, CountGrid, Divider, DividerResponse, Draggable, DraggableResponse,
     Flexible, FlexibleResponse, Image, ImageResponse, List, ListResponse, MaxWidth,
-    MaxWidthResponse, NineSlice, Offset, OffsetResponse, Opaque, OpaqueResponse, Pad, PadResponse,
-    Reflow, ReflowResponse, Scrollable, ScrollableResponse, Slider, SliderResponse, Spacer, Stack,
-    StackResponse, State, StateResponse, Text, TextBox, TextBoxResponse, TextResponse,
+    MaxWidthResponse, NineSlice, Offset, OffsetResponse, Opaque, OpaqueResponse, Outline,
+    OutlineSide, Pad, PadResponse, Reflow, ReflowResponse, Scrollable, ScrollableResponse, Slider,
+    SliderResponse, Spacer, Stack, StackResponse, State, StateResponse, Text, TextBox,
+    TextBoxResponse, TextResponse,
 };
 
 /// See [List].
@@ -197,6 +198,15 @@ pub fn stack(children: impl FnOnce()) -> Response<StackResponse> {
     Stack::new().show(children)
 }
 
+/// See [Outline].
+pub fn outline<F: FnOnce()>(
+    color: Color,
+    width: f32,
+    side: OutlineSide,
+    children: F,
+) -> Response<()> {
+    Outline::new(color, width, side).show(children)
+}
 pub fn use_state<F, T: 'static>(default: F) -> Response<StateResponse<T>>
 where
     F: FnOnce() -> T + 'static,
